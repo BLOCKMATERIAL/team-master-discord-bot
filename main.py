@@ -13,6 +13,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
+
 class MyClient(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
@@ -22,10 +23,12 @@ class MyClient(discord.Client):
         await self.tree.sync()
         self.bg_task = self.loop.create_task(check_team_expiration())
 
+
 client = MyClient()
 teams = {}
 
 VALORANT_RANKS = ["Iron", "Bronze", "Silver", "Platinum", "Gold", "Diamond", "Ascendant", "Immortal", "Radiant"]
+
 
 class JoinButton(discord.ui.Button):
     def __init__(self, team_id: str):
@@ -35,6 +38,7 @@ class JoinButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await join_team(interaction, self.team_id)
 
+
 class LeaveButton(discord.ui.Button):
     def __init__(self, team_id: str):
         super().__init__(style=discord.ButtonStyle.red, label="Leave")
@@ -42,6 +46,7 @@ class LeaveButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await leave_team(interaction, self.team_id)
+
 
 class DisbandButton(discord.ui.Button):
     def __init__(self, team_id: str):
@@ -51,6 +56,7 @@ class DisbandButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await disband_team(interaction, self.team_id)
 
+
 class TeamButtons(discord.ui.View):
     def __init__(self, team_id: str):
         super().__init__(timeout=None)
@@ -59,8 +65,19 @@ class TeamButtons(discord.ui.View):
         self.add_item(LeaveButton(team_id))
         self.add_item(DisbandButton(team_id))
 
+    def update_join_button(self, team):
+        join_button = discord.utils.get(self.children, label="Join") or discord.utils.get(self.children,
+                                                                                          label="Очередь")
+        if join_button:
+            if len([p for p in team['players'] if p]) >= 5:
+                join_button.label = "Очередь"
+            else:
+                join_button.label = "Join"
+
+
 def generate_team_id():
     return ''.join(random.choices(string.digits, k=5))
+
 
 def create_team_embed(team_id):
     team = teams.get(team_id, {})
@@ -70,14 +87,22 @@ def create_team_embed(team_id):
         if player:
             valorant_roles = [role.name for role in player.roles if role.name in VALORANT_RANKS]
             role_str = f" ({', '.join(valorant_roles)})" if valorant_roles else ""
-            # Используем корону для лидера команды
             emoji = "👑" if player == team['leader'] else "👤"
             player_list.append(f"{emoji} {player.mention}{role_str}")
         else:
             player_list.append("🔓 Вільне місце")
     embed.add_field(name="👥 Гравці:", value="\n".join(player_list) or "Немає гравців", inline=False)
+
+    reserve_list = [f"🔹 {player.mention}" for player in team.get('reserve', [])]
+    if reserve_list:
+        embed.add_field(name="🔄 Резерв:", value="\n".join(reserve_list), inline=False)
+
     embed.add_field(name="🕒 Створено:", value=team.get('created_at', datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
                     inline=False)
+
+    if len([p for p in team.get('players', []) if p]) == 5:
+        embed.add_field(name="✅ Статус:", value="Команда повна! 🎉", inline=False)
+
     embed.set_footer(text=f"🆓 Вільних місць: {5 - len([p for p in team.get('players', []) if p])}")
     return embed
 
@@ -95,7 +120,9 @@ async def update_team_message(team_id):
     channel = client.get_channel(team['channel_id'])
     message = await channel.fetch_message(team['message_id'])
     view = TeamButtons(team_id)
+    view.update_join_button(team)
     await message.edit(content="", embed=embed, view=view)
+
 
 def is_user_in_team(user):
     for team in teams.values():
@@ -103,11 +130,13 @@ def is_user_in_team(user):
             return True
     return False
 
+
 def get_user_team(user):
     for team_id, team in teams.items():
         if any(player and player.id == user.id for player in team['players']):
             return team_id
     return None
+
 
 @client.event
 async def on_ready():
@@ -118,6 +147,7 @@ async def on_ready():
     except Exception as e:
         print(e)
 
+
 async def check_team_expiration():
     while True:
         now = datetime.now()
@@ -125,6 +155,7 @@ async def check_team_expiration():
             if now - team['created_at'] > timedelta(hours=6):
                 await delete_team(team_id)
         await asyncio.sleep(60)  # Перевіряємо кожну хвилину
+
 
 async def delete_team(team_id):
     team = teams[team_id]
@@ -145,6 +176,7 @@ async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(title="Довідка по командам бота", description=help_text, color=0x00ff00)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
 @client.tree.command(name="create", description="Створити нову команду")
 async def create(interaction: discord.Interaction):
     if is_user_in_team(interaction.user):
@@ -159,18 +191,25 @@ async def create(interaction: discord.Interaction):
         'leader': interaction.user,
         'created_at': datetime.now(),
         'channel_id': interaction.channel.id,
-        'guild_id': interaction.guild_id
+        'guild_id': interaction.guild.id,
+        'reserve': []
     }
 
     embed = create_team_embed(team_id)
     view = TeamButtons(team_id)
 
+    # Використовуємо @everyone для сповіщення всіх користувачів
     await interaction.response.send_message(
-        f"🎉 Гравець {interaction.user.mention} створив команду! {interaction.guild.default_role.mention}", embed=embed,
-        view=view)
-    message = await interaction.original_response()
+        f"🎉 Гравець {interaction.user.mention} створив команду! {interaction.guild.default_role.mention}\n@everyone",
+        embed=embed,
+        view=view,
+        allowed_mentions=discord.AllowedMentions(everyone=True)  # Дозволяємо згадування @everyone
+    )
 
+    message = await interaction.original_response()
     teams[team_id]['message_id'] = message.id
+
+    await update_team_message(team_id)
 
 async def join_team(interaction: discord.Interaction, team_id: str):
     if is_user_in_team(interaction.user):
@@ -188,17 +227,29 @@ async def join_team(interaction: discord.Interaction, team_id: str):
         return
 
     if None not in team['players']:
-        await interaction.response.send_message("❌ Команда вже повна.", ephemeral=True)
+        if len(team['reserve']) < 2:
+            team['reserve'].append(interaction.user)
+            await update_team_message(team_id)
+            await interaction.response.send_message("✅ Ви додані до резерву команди.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Команда та резерв вже повні.", ephemeral=True)
         return
 
     team['players'][team['players'].index(None)] = interaction.user
     await update_team_message(team_id)
     await interaction.response.send_message("✅ Ви успішно приєдналися до команди.", ephemeral=True)
 
+
 async def leave_team(interaction: discord.Interaction, team_id: str):
     team = teams.get(team_id)
-    if not team or interaction.user not in team['players']:
+    if not team or (interaction.user not in team['players'] and interaction.user not in team['reserve']):
         await interaction.response.send_message("❌ Ви не є учасником цієї команди.", ephemeral=True)
+        return
+
+    if interaction.user in team['reserve']:
+        team['reserve'].remove(interaction.user)
+        await update_team_message(team_id)
+        await interaction.response.send_message("✅ Ви успішно покинули резерв команди.", ephemeral=True)
         return
 
     if interaction.user == team['leader']:
@@ -207,6 +258,10 @@ async def leave_team(interaction: discord.Interaction, team_id: str):
             new_leader = random.choice(active_players)
             team['leader'] = new_leader
             team['players'][team['players'].index(interaction.user)] = None
+            if team['reserve']:
+                new_player = team['reserve'].pop(0)
+                team['players'][team['players'].index(None)] = new_player
+                await new_player.send(f"✅ Ви були переміщені з резерву до активного складу команди {team_id}!")
             await update_team_message(team_id)
             await interaction.response.send_message(
                 f"✅ Ви успішно покинули команду. Новим лідером став {new_leader.mention}.", ephemeral=True)
@@ -214,8 +269,13 @@ async def leave_team(interaction: discord.Interaction, team_id: str):
             await disband_team(interaction, team_id)
     else:
         team['players'][team['players'].index(interaction.user)] = None
+        if team['reserve']:
+            new_player = team['reserve'].pop(0)
+            team['players'][team['players'].index(None)] = new_player
+            await new_player.send(f"✅ Ви були переміщені з резерву до активного складу команди {team_id}!")
         await update_team_message(team_id)
         await interaction.response.send_message("✅ Ви успішно покинули команду.", ephemeral=True)
+
 
 async def disband_team(interaction: discord.Interaction, team_id: str):
     team = teams.get(team_id)
@@ -225,6 +285,7 @@ async def disband_team(interaction: discord.Interaction, team_id: str):
 
     await delete_team(team_id)
     await interaction.response.send_message(f"🚫 Команда {team_id} розпущена.", ephemeral=True)
+
 
 @client.tree.command(name="invite", description="Запросити гравця до команди")
 async def invite(interaction: discord.Interaction, player: discord.Member):
@@ -245,11 +306,18 @@ async def invite(interaction: discord.Interaction, player: discord.Member):
         return
 
     if None not in team['players']:
-        await interaction.response.send_message("❌ Команда вже повна.", ephemeral=True)
+        if len(team['reserve']) < 2:
+            team['reserve'].append(player)
+            await update_team_message(team_id)
+            await interaction.response.send_message(f"✅ Гравець {player.mention} доданий до резерву команди.",
+                                                    ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Команда та резерв вже повні.", ephemeral=True)
         return
 
     team['players'][team['players'].index(None)] = player
     await update_team_message(team_id)
     await interaction.response.send_message(f"✅ Гравець {player.mention} доданий до команди.", ephemeral=True)
+
 
 client.run(os.getenv('DISCORD_TOKEN'))
